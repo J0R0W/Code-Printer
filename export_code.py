@@ -3,6 +3,14 @@ import os
 import sys
 import argparse
 import fnmatch
+import json
+
+# optional YAML support
+try:
+    import yaml
+    YAML_AVAILABLE = True
+except ImportError:
+    YAML_AVAILABLE = False
 
 # File extensions for media (images, videos) to skip
 MEDIA_EXTENSIONS = {
@@ -22,106 +30,166 @@ def load_gitignore(root_path):
                 if not line or line.startswith('#'):
                     continue
                 patterns.append(line)
-    # Always ignore the .git directory
-    patterns.append('.git/')
+    patterns.append('.git/')  # always ignore .git
     return patterns
 
 
-def is_ignored(path, patterns):
-    """Checks if a path (relative to root) matches any gitignore pattern."""
-    for pat in patterns:
-        if pat.endswith('/'):
-            if path.startswith(pat.rstrip('/')):
-                return True
-        if fnmatch.fnmatch(path, pat):
-            return True
+def should_skip_tree(name, rel_path, patterns, include_hidden):
+    """Skip hidden, gitignored, or media files/directories when building the tree."""
+    # Hidden
+    if not include_hidden and name.startswith('.'):
+        return True
+    # Gitignore
+    if any(fnmatch.fnmatch(rel_path, pat) for pat in patterns):
+        return True
+    # Media files
+    ext = os.path.splitext(name)[1].lower().lstrip('.')
+    if ext in MEDIA_EXTENSIONS:
+        return True
     return False
 
 
-def is_media_file(filename):
-    """Checks by file extension if it's a media file."""
-    ext = filename.lower().rsplit('.', 1)[-1]
-    return ext in MEDIA_EXTENSIONS
+def should_skip_content(name, rel_path, ignore_exts, include_pats, exclude_pats):
+    """Skip files when reading contents based on ext-ignores and include/exclude patterns."""
+    ext = os.path.splitext(name)[1].lower().lstrip('.')
+    # Ignored extensions
+    if ext in ignore_exts:
+        return True
+    # Include patterns
+    if include_pats and not any(fnmatch.fnmatch(rel_path, pat) for pat in include_pats):
+        return True
+    # Exclude patterns
+    if exclude_pats and any(fnmatch.fnmatch(rel_path, pat) for pat in exclude_pats):
+        return True
+    return False
 
 
-def is_hidden(name):
-    """Checks if a file or directory name starts with a dot."""
-    return name.startswith('.')
+def scan(root_path, patterns, include_hidden, ignore_exts, include_pats, exclude_pats, max_depth):
+    """Scans directory and returns a tree and contents dict."""
+    contents = {}
 
-
-def print_tree(root_path, out, patterns, include_hidden, ignore_exts):
-    """Prints the directory tree, filtering out media files, git-ignored, hidden files, and ignored extensions."""
-    for dirpath, dirnames, filenames in os.walk(root_path):
-        rel_dir = os.path.relpath(dirpath, root_path)
-        # Filter out hidden and git-ignored directories
-        dirnames[:] = [d for d in dirnames
-                       if (include_hidden or not is_hidden(d))
-                       and not is_ignored(os.path.join(rel_dir, d), patterns)]
-        depth = 0 if rel_dir == '.' else rel_dir.count(os.sep)
-        indent = '    ' * depth
-        dir_name = os.path.basename(dirpath) if rel_dir != '.' else os.path.basename(root_path)
-        out.write(f"{indent}{dir_name}/\n")
-        for fname in sorted(filenames):
-            rel_file = os.path.join(rel_dir, fname)
-            ext = fname.lower().rsplit('.', 1)[-1] if '.' in fname else ''
-            if (is_media_file(fname) or
-                is_ignored(rel_file, patterns) or
-                (not include_hidden and is_hidden(fname)) or
-                ext in ignore_exts):
+    def _scan(current_path, rel_base, depth):
+        if max_depth is not None and depth > max_depth:
+            return []
+        entries = []
+        try:
+            names = sorted(os.listdir(current_path))
+        except PermissionError:
+            return entries
+        for name in names:
+            full = os.path.join(current_path, name)
+            rel = os.path.join(rel_base, name) if rel_base else name
+            is_dir = os.path.isdir(full)
+            # Skip for tree building
+            if should_skip_tree(name, rel, patterns, include_hidden):
                 continue
-            out.write(f"{indent}    {fname}\n")
+            if is_dir:
+                children = _scan(full, rel, depth + 1)
+                entries.append({'type': 'dir', 'name': name, 'children': children})
+            else:
+                entries.append({'type': 'file', 'name': name, 'path': rel})
+                # Only read content if not excluded
+                if not should_skip_content(name, rel, ignore_exts, include_pats, exclude_pats):
+                    try:
+                        with open(full, 'r', encoding='utf-8') as f:
+                            contents[rel] = f.read()
+                    except Exception:
+                        contents[rel] = None
+        return entries
+
+    tree = _scan(root_path, '', 0)
+    return tree, contents
 
 
-def print_contents(root_path, out, patterns, include_hidden, ignore_exts):
-    """Prints the content of each non-media file with header and code fence, filtering hidden, ignored paths, and extensions."""
-    for dirpath, dirnames, filenames in os.walk(root_path):
-        rel_dir = os.path.relpath(dirpath, root_path)
-        dirnames[:] = [d for d in dirnames
-                       if (include_hidden or not is_hidden(d))
-                       and not is_ignored(os.path.join(rel_dir, d), patterns)]
-        for fname in sorted(filenames):
-            rel_file = os.path.join(rel_dir, fname)
-            ext = fname.lower().rsplit('.', 1)[-1] if '.' in fname else ''
-            if (is_media_file(fname) or
-                is_ignored(rel_file, patterns) or
-                (not include_hidden and is_hidden(fname)) or
-                ext in ignore_exts):
-                continue
-            file_path = os.path.join(dirpath, fname)
-            out.write(f"\n=== {rel_file} ===\n")
-            out.write("```\n")
-            try:
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    out.write(f.read())
-            except UnicodeDecodeError:
-                out.write("[Binary file: skipped]\n")
-            out.write("```\n")
+def render_text(tree, contents, out):
+    """Renders in plain text format."""
+    def _print_tree(entries, indent):
+        for e in entries:
+            if e['type'] == 'dir':
+                out.write(f"{indent}{e['name']}/\n")
+                _print_tree(e['children'], indent + '    ')
+            else:
+                out.write(f"{indent}{e['name']}\n")
+    out.write("Directory structure:\n")
+    _print_tree(tree, '')
+    out.write("\nFile contents:\n")
+    for path, content in contents.items():
+        out.write(f"\n=== {path} ===\n```")
+        if content is not None:
+            out.write(content)
+        else:
+            out.write("[Binary or unreadable file: skipped]\n")
+        out.write("```\n")
+
+
+def render_markdown(tree, contents, out):
+    """Renders in GitHub-flavored Markdown."""
+    def _md_tree(entries, indent):
+        for e in entries:
+            if e['type'] == 'dir':
+                out.write(f"{indent}- **{e['name']}/**\n")
+                _md_tree(e['children'], indent + '  ')
+            else:
+                out.write(f"{indent}- `{e['name']}`\n")
+    out.write("## Directory structure\n")
+    _md_tree(tree, '')
+    out.write("\n## File contents\n")
+    for path, content in contents.items():
+        out.write(f"#### {path}\n```")
+        if content is not None:
+            out.write(content)
+        else:
+            out.write("[Binary or unreadable file: skipped]\n")
+        out.write("```\n")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Export directory structure and file contents excluding media files, git-ignored, hidden files, or specific extensions.")
+        description="Export directory structure and file contents with flexible filtering and output formats.")
     parser.add_argument('root', help='Path to the directory to export')
-    parser.add_argument('-o', '--output', help='Path to the output file.')
-    parser.add_argument('--hidden', '-H', action='store_true',
-                        help='Include hidden files/folders (default: false)', default=False)
+    parser.add_argument('-o', '--output', help='Path to the output file')
+    parser.add_argument('--hidden', '-H', action='store_true', default=False,
+                        help='Include hidden files/folders')
     parser.add_argument('--ignore-ext', '-e', nargs='+', default=[],
-                        help='List of file extensions (without dot) to ignore, e.g. html json')
+                        help='File extensions (no dot) to ignore, e.g. html json')
+    parser.add_argument('--include', '-i', nargs='+', default=[],
+                        help='Glob patterns to include files, e.g. "*.py"')
+    parser.add_argument('--exclude', '-x', nargs='+', default=[],
+                        help='Glob patterns to exclude files, e.g. "tests/*"')
+    parser.add_argument('--max-depth', type=int, default=None,
+                        help='Maximum directory depth (0 = root only)')
+    parser.add_argument('-f', '--format', choices=['text', 'json', 'yaml', 'markdown'],
+                        default='text', help='Output format')
     args = parser.parse_args()
 
-    root = args.root
-    if not os.path.exists(root):
-        print(f"Error: Path '{root}' does not exist.", file=sys.stderr)
+    if not os.path.isdir(args.root):
+        print(f"Error: Path '{args.root}' does not exist or is not a directory.", file=sys.stderr)
         sys.exit(1)
 
-    patterns = load_gitignore(root)
+    patterns = load_gitignore(args.root)
     ignore_exts = set(ext.lower() for ext in args.ignore_ext)
+    include_pats = args.include
+    exclude_pats = args.exclude
+
+    tree, contents = scan(
+        args.root, patterns, args.hidden,
+        ignore_exts, include_pats, exclude_pats,
+        args.max_depth
+    )
+
     out = open(args.output, 'w', encoding='utf-8') if args.output else sys.stdout
 
-    out.write("Directory structure:\n")
-    print_tree(root, out, patterns, args.hidden, ignore_exts)
-    out.write("\nFile contents:\n")
-    print_contents(root, out, patterns, args.hidden, ignore_exts)
+    if args.format == 'text':
+        render_text(tree, contents, out)
+    elif args.format == 'markdown':
+        render_markdown(tree, contents, out)
+    elif args.format == 'json':
+        json.dump({'structure': tree, 'contents': contents}, out, indent=2)
+    elif args.format == 'yaml':
+        if not YAML_AVAILABLE:
+            print("Error: PyYAML not installed; YAML format unavailable.", file=sys.stderr)
+            sys.exit(1)
+        yaml.dump({'structure': tree, 'contents': contents}, out)
 
     if args.output:
         out.close()
