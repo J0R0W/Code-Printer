@@ -4,7 +4,7 @@ import sys
 import argparse
 import fnmatch
 
-# Dateiendungen für Medien (Bilder, Videos) zum Überspringen
+# File extensions for media (images, videos) to skip
 MEDIA_EXTENSIONS = {
     'png', 'jpg', 'jpeg', 'gif', 'bmp', 'svg', 'ico',
     'mp4', 'mov', 'avi', 'mkv', 'flv', 'wmv', 'webm'
@@ -12,7 +12,7 @@ MEDIA_EXTENSIONS = {
 
 
 def load_gitignore(root_path):
-    """Lädt Patterns aus .gitignore im Wurzelverzeichnis."""
+    """Loads patterns from .gitignore in the root directory."""
     patterns = []
     gitignore_path = os.path.join(root_path, '.gitignore')
     if os.path.isfile(gitignore_path):
@@ -22,13 +22,13 @@ def load_gitignore(root_path):
                 if not line or line.startswith('#'):
                     continue
                 patterns.append(line)
-    # Standardmäßig .git Verzeichnis ignorieren
+    # Always ignore the .git directory
     patterns.append('.git/')
     return patterns
 
 
 def is_ignored(path, patterns):
-    """Prüft, ob ein Pfad (relativ zum Root) einem Gitignore-Pattern entspricht."""
+    """Checks if a path (relative to root) matches any gitignore pattern."""
     for pat in patterns:
         if pat.endswith('/'):
             if path.startswith(pat.rstrip('/')):
@@ -39,21 +39,21 @@ def is_ignored(path, patterns):
 
 
 def is_media_file(filename):
-    """Überprüft anhand der Dateiendung, ob es sich um eine Mediendatei handelt."""
+    """Checks by file extension if it's a media file."""
     ext = filename.lower().rsplit('.', 1)[-1]
     return ext in MEDIA_EXTENSIONS
 
 
 def is_hidden(name):
-    """Prüft, ob ein Datei- oder Verzeichnisname mit einem Punkt beginnt."""
+    """Checks if a file or directory name starts with a dot."""
     return name.startswith('.')
 
 
 def print_tree(root_path, out, patterns, include_hidden, ignore_exts):
-    """Gibt die Verzeichnisstruktur aus, filtert Mediendateien, Git-ignorierte, versteckte Dateien und ignorierte Endungen."""
+    """Prints the directory tree, filtering out media files, git-ignored, hidden files, and ignored extensions."""
     for dirpath, dirnames, filenames in os.walk(root_path):
         rel_dir = os.path.relpath(dirpath, root_path)
-        # Hidden und Git-ignored Verzeichnisse filtern
+        # Filter out hidden and git-ignored directories
         dirnames[:] = [d for d in dirnames
                        if (include_hidden or not is_hidden(d))
                        and not is_ignored(os.path.join(rel_dir, d), patterns)]
@@ -73,7 +73,7 @@ def print_tree(root_path, out, patterns, include_hidden, ignore_exts):
 
 
 def print_contents(root_path, out, patterns, include_hidden, ignore_exts):
-    """Gibt den Inhalt jeder Nicht-Mediendatei mit Kopfzeile und Code-Fence aus, filtert versteckte, ignorierte Pfade und Endungen."""
+    """Prints the content of each non-media file with header and code fence, filtering hidden, ignored paths, and extensions."""
     for dirpath, dirnames, filenames in os.walk(root_path):
         rel_dir = os.path.relpath(dirpath, root_path)
         dirnames[:] = [d for d in dirnames
@@ -94,33 +94,33 @@ def print_contents(root_path, out, patterns, include_hidden, ignore_exts):
                 with open(file_path, 'r', encoding='utf-8') as f:
                     out.write(f.read())
             except UnicodeDecodeError:
-                out.write("[Binary file: übersprungen]\n")
+                out.write("[Binary file: skipped]\n")
             out.write("```\n")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Exportiere Verzeichnisstruktur und Dateiinhalte ohne Mediendateien, Git-ignorierte, versteckte Dateien oder bestimmte Endungen.")
-    parser.add_argument('root', help='Pfad zum Verzeichnis, das exportiert werden soll')
-    parser.add_argument('-o', '--output', help='Pfad zur Ausgabedatei.')
+        description="Export directory structure and file contents excluding media files, git-ignored, hidden files, or specific extensions.")
+    parser.add_argument('root', help='Path to the directory to export')
+    parser.add_argument('-o', '--output', help='Path to the output file.')
     parser.add_argument('--hidden', '-H', action='store_true',
-                        help='Versteckte Dateien/Ordner einbeziehen (Standard: aus)', default=False)
+                        help='Include hidden files/folders (default: false)', default=False)
     parser.add_argument('--ignore-ext', '-e', nargs='+', default=[],
-                        help='Liste von Dateiendungen (ohne Punkt), die ignoriert werden sollen, z.B. html json')
+                        help='List of file extensions (without dot) to ignore, e.g. html json')
     args = parser.parse_args()
 
     root = args.root
     if not os.path.exists(root):
-        print(f"Fehler: Pfad '{root}' existiert nicht.", file=sys.stderr)
+        print(f"Error: Path '{root}' does not exist.", file=sys.stderr)
         sys.exit(1)
 
     patterns = load_gitignore(root)
     ignore_exts = set(ext.lower() for ext in args.ignore_ext)
     out = open(args.output, 'w', encoding='utf-8') if args.output else sys.stdout
 
-    out.write("Verzeichnisstruktur:\n")
+    out.write("Directory structure:\n")
     print_tree(root, out, patterns, args.hidden, ignore_exts)
-    out.write("\nDateiinhalte:\n")
+    out.write("\nFile contents:\n")
     print_contents(root, out, patterns, args.hidden, ignore_exts)
 
     if args.output:
